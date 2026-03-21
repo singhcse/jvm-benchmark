@@ -1,0 +1,226 @@
+networks:
+  benchmark-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: benchmark-postgres
+    networks: [benchmark-net]
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: benchmarkdb
+      POSTGRES_USER: benchmark
+      POSTGRES_PASSWORD: benchmark123
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U benchmark -d benchmarkdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  app1:
+    build:
+      context: ./app1-java8-g1gc
+      dockerfile: Dockerfile
+    container_name: benchmark-app1
+    networks: [benchmark-net]
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/benchmarkdb
+      POSTGRES_DRIVER: org.postgresql.Driver
+      POSTGRES_USER: benchmark
+      POSTGRES_PASSWORD: benchmark123
+      HIBERNATE_DIALECT: org.hibernate.dialect.PostgreSQLDialect
+      JAVA_OPTS: "-server -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:G1HeapRegionSize=8m -Xms256m -Xmx512m -XX:+TieredCompilation"
+    volumes:
+      - ./logs/app1:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 700M
+
+  app2:
+    build:
+      context: ./app2-java21-zgc-loom
+      dockerfile: Dockerfile
+    container_name: benchmark-app2
+    networks: [benchmark-net]
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/benchmarkdb
+      POSTGRES_DRIVER: org.postgresql.Driver
+      POSTGRES_USER: benchmark
+      POSTGRES_PASSWORD: benchmark123
+      HIBERNATE_DIALECT: org.hibernate.dialect.PostgreSQLDialect
+      JAVA_OPTS: "-XX:+UseZGC -XX:+ZGenerational -Xms128m -Xmx512m -Dspring.threads.virtual.enabled=true"
+    volumes:
+      - ./logs/app2:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8081/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 700M
+
+  app3:
+    build:
+      context: ./app3-graalvm-native
+      dockerfile: Dockerfile
+    container_name: benchmark-app3
+    networks: [benchmark-net]
+    ports:
+      - "8082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/benchmarkdb
+      POSTGRES_DRIVER: org.postgresql.Driver
+      POSTGRES_USER: benchmark
+      POSTGRES_PASSWORD: benchmark123
+      HIBERNATE_DIALECT: org.hibernate.dialect.PostgreSQLDialect
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8082/api/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 256M
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: benchmark-gateway
+    networks: [benchmark-net]
+    ports:
+      - "9000:9000"
+    depends_on:
+      - app1
+      - app2
+      - app3
+    environment:
+      APP1_URL: http://app1:8080
+      APP2_URL: http://app2:8081
+      APP3_URL: http://app3:8082
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: benchmark-prometheus
+    networks: [benchmark-net]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: benchmark-grafana
+    networks: [benchmark-net]
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: benchmark
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # ── Restart Agent ──────────────────────────────────────────────────────────
+  # Runs node agent.js inside Docker
+  # Mounts Docker socket so it can restart other containers
+  # Accessible from React dashboard at http://localhost:9999
+  agent:
+    build:
+      context: .
+      dockerfile: agent.Dockerfile
+    container_name: benchmark-agent
+    networks: [benchmark-net]
+    ports:
+      - "9999:9999"
+    volumes:
+      # Mount Docker socket — lets agent run docker restart commands on host
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Mount project root so agent can find compose file
+      - .:/project
+    environment:
+      RUNNING_IN_DOCKER: "true"
+      PROJECT_ROOT: /project
+      PORT: "9999"
+    depends_on:
+      - app1
+      - app2
+      - app3
+    restart: unless-stopped
+
+  # ── React Dashboard (production build served via nginx) ────────────────────
+  # Only used when deploying to Oracle Cloud / VPS
+  # Locally: use npm run dev instead
+  dashboard:
+    build:
+      context: ./react-dashboard
+      dockerfile: Dockerfile
+    container_name: benchmark-dashboard
+    networks: [benchmark-net]
+    ports:
+      - "3000:3000"
+    depends_on:
+      - app1
+      - app2
+      - app3
+    restart: unless-stopped
+    profiles:
+      - production   # only starts with: docker compose --profile production up
