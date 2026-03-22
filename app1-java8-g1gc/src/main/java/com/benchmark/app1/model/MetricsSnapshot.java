@@ -11,6 +11,7 @@ public class MetricsSnapshot {
     private long nonHeapUsedMb;
     private int threadCount;
     private boolean virtualThreads;
+    private int peakBurstThreads, activeBurstThreads, burstRejected;
     private long gcPauseMaxMs;
     private long gcPauseAvgMs;
     private long gcCollectionCount;
@@ -40,6 +41,9 @@ public class MetricsSnapshot {
         this.javaVersion = b.javaVersion;
         this.compiler = b.compiler;
         this.threadModel = b.threadModel;
+        this.peakBurstThreads = b.peakBurstThreads;
+        this.activeBurstThreads = b.activeBurstThreads;
+        this.burstRejected = b.burstRejected;
     }
 
     public static Builder builder() { return new Builder(); }
@@ -62,6 +66,9 @@ public class MetricsSnapshot {
     public String getJavaVersion() { return javaVersion; }
     public String getCompiler() { return compiler; }
     public String getThreadModel() { return threadModel; }
+    public int getPeakBurstThreads() { return peakBurstThreads; }
+    public int getActiveBurstThreads() { return activeBurstThreads; }
+    public int getBurstRejected() { return burstRejected; }
 
     public static class Builder {
         private String appName, appLabel, gcType, javaVersion, compiler, threadModel;
@@ -70,6 +77,7 @@ public class MetricsSnapshot {
         private long gcPauseMaxMs, gcPauseAvgMs, gcCollectionCount;
         private double cpuPercent;
         private boolean virtualThreads;
+        private int peakBurstThreads, activeBurstThreads, burstRejected;
 
         public Builder appName(String v) { this.appName = v; return this; }
         public Builder appLabel(String v) { this.appLabel = v; return this; }
@@ -88,6 +96,9 @@ public class MetricsSnapshot {
         public Builder javaVersion(String v) { this.javaVersion = v; return this; }
         public Builder compiler(String v) { this.compiler = v; return this; }
         public Builder threadModel(String v) { this.threadModel = v; return this; }
+        public Builder peakBurstThreads(int v) { this.peakBurstThreads = v; return this; }
+        public Builder activeBurstThreads(int v) { this.activeBurstThreads = v; return this; }
+        public Builder burstRejected(int v) { this.burstRejected = v; return this; }
         public MetricsSnapshot build() { return new MetricsSnapshot(this); }
     }
 }

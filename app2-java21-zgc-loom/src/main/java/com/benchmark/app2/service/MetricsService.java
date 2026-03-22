@@ -1,6 +1,7 @@
 package com.benchmark.app2.service;
 
 import com.benchmark.app2.config.StartupTracker;
+import com.benchmark.app2.controller.ThreadDemoController;
 import com.benchmark.app2.model.MetricsSnapshot;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Service;
@@ -46,6 +47,10 @@ public class MetricsService {
                 .heapMaxMb(heap.getMax()       / 1024 / 1024)
                 .nonHeapUsedMb(nonHeap.getUsed() / 1024 / 1024)
                 .threadCount(threads.getThreadCount())
+                // App2: peak virtual threads + carrier OS threads
+                .peakBurstThreads(ThreadDemoController.getPeakVirtualThreads())
+                .activeBurstThreads(ThreadDemoController.getLiveActiveVThreads())
+                .burstRejected(0)
                 .virtualThreads(true)
                 .gcPauseMaxMs(gcPauseMax)
                 .gcPauseAvgMs(gcPauseAvg)

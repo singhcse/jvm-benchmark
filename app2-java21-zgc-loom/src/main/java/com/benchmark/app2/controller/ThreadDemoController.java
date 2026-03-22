@@ -15,7 +15,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class ThreadDemoController {
 
     private static final AtomicInteger totalSucceeded = new AtomicInteger(0);
-    private static final AtomicInteger totalRejected  = new AtomicInteger(0);
+
+    // Live tracking
+    private static volatile int liveActiveVThreads = 0;
+    private static volatile int peakActiveVThreads = 0;
+    private static volatile int liveCarrierThreads = 0;
+    private static volatile int lastConcurrency = 0;
+    private static volatile int lastSucceeded = 0;
+    private static volatile long lastElapsedMs = 0;
 
     @GetMapping("/thread-demo")
     public ResponseEntity<Map<String, Object>> threadDemo(
@@ -27,40 +34,59 @@ public class ThreadDemoController {
         r.put("status", "OK");
         r.put("threadName", t.getName());
         r.put("threadType", "virtual");
-        r.put("isVirtual",  t.isVirtual());
+        r.put("isVirtual", t.isVirtual());
         r.put("sleepMs", sleepMs);
         return ResponseEntity.ok(r);
     }
 
     /**
-     * BURST endpoint — App2 version with VIRTUAL threads.
-     *
-     * Uses Executors.newVirtualThreadPerTaskExecutor() — creates one virtual
-     * thread per task. No fixed pool, no rejection possible.
-     *
-     * With 1000 concurrent tasks each sleeping 200ms:
-     *   App1: 200 run, 800 queue/reject (fixed platform pool)
-     *   App2: ALL 1000 run concurrently on ~8 carrier OS threads
-     *
-     * This is the core Loom demonstration.
+     * Server-side burst — App2 virtual thread version.
+     * <p>
+     * Key difference from App1:
+     * App1: newFixedThreadPool(200) — 201st task rejected
+     * App2: newVirtualThreadPerTaskExecutor() — every task gets its own virtual thread
+     * <p>
+     * With 1000 concurrent tasks sleeping 200ms:
+     * App1: 200 run, 800 rejected, takes 200ms
+     * App2: ALL 1000 run concurrently, 0 rejected, takes ~200ms (same!)
+     * <p>
+     * The carrier thread count (OS threads) stays tiny (~8-20)
+     * while virtual threads number in the thousands.
      */
     @PostMapping("/thread-demo/burst")
     public ResponseEntity<Map<String, Object>> burst(
             @RequestParam(defaultValue = "100") int concurrency,
             @RequestParam(defaultValue = "200") int sleepMs) throws InterruptedException {
 
-        // Virtual thread per task — unlimited, no rejection possible
+        lastConcurrency = concurrency;
+        liveActiveVThreads = 0;
+        peakActiveVThreads = 0;
+
+        // Virtual thread per task — no limit, no rejection
         ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor();
 
         List<Future<String>> futures = new ArrayList<>();
+        AtomicInteger active = new AtomicInteger(0);
+        AtomicInteger peak = new AtomicInteger(0);
         long start = System.currentTimeMillis();
 
-        // Submit ALL tasks — all get their own virtual thread immediately
         for (int i = 0; i < concurrency; i++) {
             futures.add(pool.submit(() -> {
-                // This parks the virtual thread, releases carrier OS thread
-                Thread.sleep(sleepMs);
-                return "ok";
+                int cur = active.incrementAndGet();
+                peak.updateAndGet(p -> Math.max(p, cur));
+                liveActiveVThreads = cur;
+                peakActiveVThreads = peak.get();
+                // Carrier thread count — how many OS threads actually used
+                liveCarrierThreads = ManagementFactory.getThreadMXBean().getThreadCount();
+                try {
+                    // Virtual thread PARKS here — releases carrier OS thread
+                    // This is why carrier count stays low even with 5000 virtual threads
+                    Thread.sleep(sleepMs);
+                    return "ok";
+                } finally {
+                    active.decrementAndGet();
+                    liveActiveVThreads = active.get();
+                }
             }));
         }
 
@@ -69,51 +95,79 @@ public class ThreadDemoController {
 
         int okCount = 0;
         for (Future<String> f : futures) {
-            try { if ("ok".equals(f.get(100, TimeUnit.MILLISECONDS))) okCount++; }
-            catch (Exception ignored) {}
+            try {
+                if ("ok".equals(f.get(200, TimeUnit.MILLISECONDS))) okCount++;
+            } catch (Exception ignored) {
+            }
         }
 
-        totalSucceeded.addAndGet(okCount);
-        // Virtual threads never reject
         long elapsed = System.currentTimeMillis() - start;
+        liveActiveVThreads = 0;
+        peakActiveVThreads = peak.get();
+        liveCarrierThreads = ManagementFactory.getThreadMXBean().getThreadCount();
+        lastSucceeded = okCount;
+        lastElapsedMs = elapsed;
 
-        ThreadMXBean tb = ManagementFactory.getThreadMXBean();
+        totalSucceeded.addAndGet(okCount);
 
         Map<String, Object> result = new LinkedHashMap<>();
-        result.put("app",            "app2-java21-zgc-loom");
-        result.put("threadType",     "virtual");
-        result.put("isVirtual",      true);
-        result.put("concurrency",    concurrency);
-        result.put("sleepMs",        sleepMs);
-        result.put("threadLimit",    "unlimited");
-        result.put("succeeded",      okCount);
-        result.put("rejected",       0);
-        result.put("elapsedMs",      elapsed);
-        result.put("carrierThreads", tb.getThreadCount());
-        result.put("utilizationPct", 0);
+        result.put("app", "app2-java21-zgc-loom");
+        result.put("threadType", "virtual");
+        result.put("isVirtual", true);
+        result.put("concurrency", concurrency);
+        result.put("sleepMs", sleepMs);
+        result.put("threadLimit", "unlimited");
+        result.put("succeeded", okCount);
+        result.put("rejected", 0);
+        result.put("peakVirtualThreads", peak.get());
+        result.put("carrierThreads", liveCarrierThreads);
+        result.put("elapsedMs", elapsed);
         result.put("totalSucceeded", totalSucceeded.get());
-        result.put("totalRejected",  0);
+        result.put("totalRejected", 0);
         return ResponseEntity.ok(result);
     }
 
     @GetMapping("/thread-demo/stats")
     public ResponseEntity<Map<String, Object>> stats() {
-        ThreadMXBean tb = ManagementFactory.getThreadMXBean();
         Map<String, Object> r = new LinkedHashMap<>();
-        r.put("app",            "app2-java21-zgc-loom");
-        r.put("threadType",     "virtual");
-        r.put("isVirtual",      true);
-        r.put("carrierThreads", tb.getThreadCount());
-        r.put("threadLimit",    "unlimited");
+        r.put("app", "app2-java21-zgc-loom");
+        r.put("threadType", "virtual");
+        r.put("isVirtual", true);
+        r.put("liveActiveVThreads", liveActiveVThreads);
+        r.put("peakVirtualThreads", peakActiveVThreads);
+        r.put("carrierThreads", liveCarrierThreads > 0 ? liveCarrierThreads : ManagementFactory.getThreadMXBean().getThreadCount());
+        r.put("threadLimit", "unlimited");
+        r.put("lastConcurrency", lastConcurrency);
+        r.put("lastSucceeded", lastSucceeded);
+        r.put("lastRejected", 0);
+        r.put("lastElapsedMs", lastElapsedMs);
         r.put("totalSucceeded", totalSucceeded.get());
-        r.put("totalRejected",  0);
-        r.put("willCrashAt",    "never");
+        r.put("totalRejected", 0);
+        r.put("utilizationPct", 0);
+        r.put("willCrashAt", "never — virtual threads scale freely");
         return ResponseEntity.ok(r);
     }
 
     @PostMapping("/thread-demo/reset")
     public ResponseEntity<Map<String, Object>> reset() {
-        totalSucceeded.set(0); totalRejected.set(0);
+        totalSucceeded.set(0);
+        liveActiveVThreads = 0;
+        peakActiveVThreads = 0;
+        lastSucceeded = 0;
+        lastElapsedMs = 0;
+        lastConcurrency = 0;
         return ResponseEntity.ok(Map.of("reset", true));
+    }
+
+    public static int getLiveActiveVThreads() {
+        return liveActiveVThreads;
+    }
+
+    public static int getPeakVirtualThreads() {
+        return peakActiveVThreads;
+    }
+
+    public static int getLastRejected() {
+        return 0;
     }
 }

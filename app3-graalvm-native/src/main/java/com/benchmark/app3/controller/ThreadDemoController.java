@@ -14,44 +14,69 @@ import java.util.concurrent.atomic.AtomicInteger;
 @CrossOrigin(origins = "*")
 public class ThreadDemoController {
 
-    private static final AtomicInteger totalRejected  = new AtomicInteger(0);
-    private static final AtomicInteger totalSucceeded = new AtomicInteger(0);
     private static final int THREAD_POOL_LIMIT = 200;
+    private static final AtomicInteger totalSucceeded = new AtomicInteger(0);
+    private static final AtomicInteger totalRejected = new AtomicInteger(0);
+
+    private static volatile int liveActiveThreads = 0;
+    private static volatile int livePeakThreads = 0;
+    private static volatile int liveOsThreads = 0;
+    private static volatile int lastConcurrency = 0;
+    private static volatile int lastRejected = 0;
+    private static volatile int lastSucceeded = 0;
+    private static volatile long lastElapsedMs = 0;
 
     @GetMapping("/thread-demo")
     public ResponseEntity<Map<String, Object>> threadDemo(
             @RequestParam(defaultValue = "200") int sleepMs) throws InterruptedException {
         Thread.sleep(sleepMs);
         Map<String, Object> r = new LinkedHashMap<>();
-        r.put("app",        "app3-graalvm-native");
-        r.put("status",     "OK");
+        r.put("app", "app3-graalvm-native");
+        r.put("status", "OK");
         r.put("threadName", Thread.currentThread().getName());
         r.put("threadType", "platform");
-        r.put("isVirtual",  false);
-        r.put("sleepMs",    sleepMs);
+        r.put("isVirtual", false);
+        r.put("sleepMs", sleepMs);
         return ResponseEntity.ok(r);
     }
 
-    /**
-     * BURST endpoint — App3 version (same as App1, platform threads).
-     * Native image still uses platform threads — same pool exhaustion behaviour.
-     * Shows that AOT compilation alone doesn't solve concurrency.
-     */
     @PostMapping("/thread-demo/burst")
     public ResponseEntity<Map<String, Object>> burst(
             @RequestParam(defaultValue = "100") int concurrency,
             @RequestParam(defaultValue = "200") int sleepMs) throws InterruptedException {
 
-        ExecutorService pool = Executors.newFixedThreadPool(THREAD_POOL_LIMIT);
+        lastConcurrency = concurrency;
+        liveActiveThreads = 0;
+        livePeakThreads = 0;
+
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(
+                THREAD_POOL_LIMIT, THREAD_POOL_LIMIT,
+                0L, TimeUnit.MILLISECONDS,
+                new SynchronousQueue<>(),
+                new ThreadPoolExecutor.AbortPolicy()
+        );
+
         List<Future<String>> futures = new ArrayList<>();
+        AtomicInteger active = new AtomicInteger(0);
+        AtomicInteger peak = new AtomicInteger(0);
         AtomicInteger rejected = new AtomicInteger(0);
         long start = System.currentTimeMillis();
 
         for (int i = 0; i < concurrency; i++) {
             try {
                 futures.add(pool.submit(() -> {
-                    Thread.sleep(sleepMs);
-                    return "ok";
+                    int cur = active.incrementAndGet();
+                    peak.updateAndGet(p -> Math.max(p, cur));
+                    liveActiveThreads = cur;
+                    livePeakThreads = peak.get();
+                    liveOsThreads = ManagementFactory.getThreadMXBean().getThreadCount();
+                    try {
+                        Thread.sleep(sleepMs);
+                        return "ok";
+                    } finally {
+                        active.decrementAndGet();
+                        liveActiveThreads = active.get();
+                    }
                 }));
             } catch (RejectedExecutionException e) {
                 rejected.incrementAndGet();
@@ -59,54 +84,90 @@ public class ThreadDemoController {
         }
 
         pool.shutdown();
-        pool.awaitTermination(sleepMs * 3L + 2000, TimeUnit.MILLISECONDS);
+        pool.awaitTermination(sleepMs * 3L + 3000, TimeUnit.MILLISECONDS);
 
         int okCount = 0;
         for (Future<String> f : futures) {
-            try { if ("ok".equals(f.get(100, TimeUnit.MILLISECONDS))) okCount++; }
-            catch (Exception ignored) {}
+            try {
+                if ("ok".equals(f.get(200, TimeUnit.MILLISECONDS))) okCount++;
+            } catch (Exception ignored) {
+            }
         }
 
-        int actualRejected = concurrency - okCount;
+        int actualRejected = rejected.get() + Math.max(0, futures.size() - okCount);
+        long elapsed = System.currentTimeMillis() - start;
+
+        liveActiveThreads = 0;
+        livePeakThreads = peak.get();
+        liveOsThreads = ManagementFactory.getThreadMXBean().getThreadCount();
+        lastRejected = actualRejected;
+        lastSucceeded = okCount;
+        lastElapsedMs = elapsed;
+
         totalSucceeded.addAndGet(okCount);
         totalRejected.addAndGet(actualRejected);
 
-        ThreadMXBean tb = ManagementFactory.getThreadMXBean();
         Map<String, Object> result = new LinkedHashMap<>();
-        result.put("app",            "app3-graalvm-native");
-        result.put("threadType",     "platform");
-        result.put("isVirtual",      false);
-        result.put("concurrency",    concurrency);
-        result.put("sleepMs",        sleepMs);
-        result.put("threadLimit",    THREAD_POOL_LIMIT);
-        result.put("succeeded",      okCount);
-        result.put("rejected",       actualRejected);
-        result.put("elapsedMs",      System.currentTimeMillis() - start);
-        result.put("totalOsThreads", tb.getThreadCount());
-        result.put("utilizationPct", Math.min(100, concurrency * 100 / THREAD_POOL_LIMIT));
+        result.put("app", "app3-graalvm-native");
+        result.put("threadType", "platform");
+        result.put("isVirtual", false);
+        result.put("concurrency", concurrency);
+        result.put("sleepMs", sleepMs);
+        result.put("threadPoolLimit", THREAD_POOL_LIMIT);
+        result.put("succeeded", okCount);
+        result.put("rejected", actualRejected);
+        result.put("peakActiveThreads", peak.get());
+        result.put("elapsedMs", elapsed);
+        result.put("totalOsThreads", liveOsThreads);
+        result.put("utilizationPct", Math.min(100, peak.get() * 100 / THREAD_POOL_LIMIT));
         result.put("totalSucceeded", totalSucceeded.get());
-        result.put("totalRejected",  totalRejected.get());
+        result.put("totalRejected", totalRejected.get());
         return ResponseEntity.ok(result);
     }
 
     @GetMapping("/thread-demo/stats")
     public ResponseEntity<Map<String, Object>> stats() {
-        ThreadMXBean tb = ManagementFactory.getThreadMXBean();
         Map<String, Object> r = new LinkedHashMap<>();
-        r.put("app",            "app3-graalvm-native");
-        r.put("threadType",     "platform");
-        r.put("isVirtual",      false);
-        r.put("totalOsThreads", tb.getThreadCount());
-        r.put("threadLimit",    THREAD_POOL_LIMIT);
+        r.put("app", "app3-graalvm-native");
+        r.put("threadType", "platform");
+        r.put("isVirtual", false);
+        r.put("liveActiveThreads", liveActiveThreads);
+        r.put("peakActiveThreads", livePeakThreads);
+        r.put("totalOsThreads", liveOsThreads > 0 ? liveOsThreads : ManagementFactory.getThreadMXBean().getThreadCount());
+        r.put("threadPoolLimit", THREAD_POOL_LIMIT);
+        r.put("lastConcurrency", lastConcurrency);
+        r.put("lastSucceeded", lastSucceeded);
+        r.put("lastRejected", lastRejected);
+        r.put("lastElapsedMs", lastElapsedMs);
         r.put("totalSucceeded", totalSucceeded.get());
-        r.put("totalRejected",  totalRejected.get());
-        r.put("willCrashAt",    THREAD_POOL_LIMIT + " concurrent");
+        r.put("totalRejected", totalRejected.get());
+        r.put("utilizationPct", THREAD_POOL_LIMIT > 0 ? Math.min(100, liveActiveThreads * 100 / THREAD_POOL_LIMIT) : 0);
+        r.put("willCrashAt", THREAD_POOL_LIMIT + " concurrent requests");
         return ResponseEntity.ok(r);
     }
 
     @PostMapping("/thread-demo/reset")
     public ResponseEntity<Map<String, Object>> reset() {
-        totalRejected.set(0); totalSucceeded.set(0);
+        totalRejected.set(0);
+        totalSucceeded.set(0);
+        liveActiveThreads = 0;
+        livePeakThreads = 0;
+        lastRejected = 0;
+        lastSucceeded = 0;
+        lastElapsedMs = 0;
+        lastConcurrency = 0;
         return ResponseEntity.ok(Map.of("reset", true));
+    }
+
+    public static int getLiveActiveThreads() {
+        return liveActiveThreads;
+    }
+
+    public static int getLivePeakThreads() {
+        return livePeakThreads;
+    }
+
+    public static int getLastRejected() {
+        return lastRejected;
     }
 }

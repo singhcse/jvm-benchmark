@@ -1,6 +1,7 @@
 package com.benchmark.app1.service;
 
 import com.benchmark.app1.config.StartupTracker;
+import com.benchmark.app1.controller.ThreadDemoController;
 import com.benchmark.app1.model.MetricsSnapshot;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Service;
@@ -42,12 +43,16 @@ public class MetricsService {
                 .appName("app1-java8-g1gc")
                 .appLabel("Java 8 · G1GC · JIT")
                 .port(8080)
-                // Real startup: measured from main() first line to DB seed complete
                 .startupMs(StartupTracker.getStartupMs())
                 .heapUsedMb(heap.getUsed()    / 1024 / 1024)
                 .heapMaxMb(heap.getMax()       / 1024 / 1024)
                 .nonHeapUsedMb(nonHeap.getUsed() / 1024 / 1024)
+                // Total JVM threads (background: GC, JIT, Tomcat idle pool etc.)
                 .threadCount(threads.getThreadCount())
+                // Peak threads during last burst — captured from ThreadDemoController
+                .peakBurstThreads(ThreadDemoController.getLivePeakThreads())
+                .activeBurstThreads(ThreadDemoController.getLiveActiveThreads())
+                .burstRejected(ThreadDemoController.getLastRejected())
                 .virtualThreads(false)
                 .gcPauseMaxMs(gcPauseMax)
                 .gcPauseAvgMs(gcPauseAvg)
