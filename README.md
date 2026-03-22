@@ -5,9 +5,15 @@ Java runtime strategies side-by-side, with a live React dashboard and load testi
 
 ---
 
-## Architecture
+## High Level Design
+
+![HLD](design/high-level-design.png)
+
+
+
 
 ```
+## Architecture
 React Dashboard (port 3000)
         │
         ▼
