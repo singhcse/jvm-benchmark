@@ -16,6 +16,14 @@ LABEL description="Traditional JVM: Java 8 + HotSpot JIT + G1GC + Platform Threa
 WORKDIR /app
 COPY --from=build /workspace/target/*.jar app.jar
 
+# Install k6 for load test triggering
+RUN apk add --no-cache curl bash && \
+    curl -LO https://github.com/grafana/k6/releases/download/v0.49.0/k6-v0.49.0-linux-amd64.tar.gz && \
+    tar -xzf k6-v0.49.0-linux-amd64.tar.gz && \
+    mv k6-v0.49.0-linux-amd64/k6 /usr/local/bin/k6 && \
+    rm -rf k6-v0.49.0-linux-amd64* && \
+    k6 version
+
 # GC logging directory
 RUN mkdir -p /logs
 

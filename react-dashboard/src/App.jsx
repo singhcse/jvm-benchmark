@@ -11,6 +11,7 @@ import MetricsDetail from './components/MetricsDetail'
 import ColdStartRace from './components/ColdStartRace'
 import RestartPanel from './components/RestartPanel'
 import ThreadStressDemo from './components/ThreadStressDemo'
+import LoadTestPanel from './components/LoadTestPanel'
 
 const layout = {
   wrap:     { maxWidth: 1400, margin: '0 auto', padding: '24px 20px 48px' },
@@ -78,9 +79,14 @@ export default function App() {
         <Charts history={history} apps={APPS} />
       </div>
 
-      {/* Thread stress demo — full width, most important new panel */}
+      {/* Thread stress demo */}
       <div style={layout.section}>
         <ThreadStressDemo />
+      </div>
+
+      {/* k6 load test */}
+      <div style={layout.section}>
+        <LoadTestPanel />
       </div>
 
       {/* Restart + Cold Start Race + Benchmark Runner */}
